@@ -8,3 +8,5 @@ typedef struct zh_stats {
   size_t alloc_count;
   size_t free_count;
 } zh_stats_t;
+
+void zh_stats_get(zh_stats_t* out);

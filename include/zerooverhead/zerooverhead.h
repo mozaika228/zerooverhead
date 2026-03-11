@@ -12,6 +12,7 @@ extern "C" {
 
 void  zh_init(void);
 void  zh_shutdown(void);
+void  zh_thread_shutdown(void);
 
 void* zh_malloc(size_t size);
 void  zh_free(void* ptr);
