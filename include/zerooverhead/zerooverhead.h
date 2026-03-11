@@ -1,4 +1,4 @@
-# Public C API
+/* Public C API */
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
