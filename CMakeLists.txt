@@ -32,7 +32,13 @@ add_library(zerooverhead
   src/c/guard/ubsan/zh_ubsan.c
 )
 
-target_include_directories(zerooverhead PUBLIC include)
+target_include_directories(zerooverhead
+  PUBLIC
+    include
+  PRIVATE
+    src/c
+    src/c/alloc
+)
 
 target_compile_features(zerooverhead PUBLIC c_std_11)
 
