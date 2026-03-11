@@ -1,0 +1,19 @@
+# Ignore build outputs
+build/
+**/build/
+
+# OS and editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Rust
+**/target/
+
+# Python
+__pycache__/
+*.pyc
+
+# Bench results
+benchmarks/results/
