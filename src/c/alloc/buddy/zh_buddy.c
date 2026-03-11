@@ -1,4 +1,4 @@
-#include "zh_buddy.h"
+#include "../zh_buddy.h"
 #include "../zh_internal.h"
 #include "../threads/zh_spinlock.h"
 #include "../platform/zh_platform.h"
