@@ -44,6 +44,7 @@ target_compile_features(zerooverhead PUBLIC c_std_11)
 
 if (MSVC)
   target_compile_options(zerooverhead PRIVATE /std:c11)
+  target_compile_options(zerooverhead PRIVATE /experimental:c11atomics)
 endif()
 
 if (ZH_BUILD_TESTS)
