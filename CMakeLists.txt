@@ -42,6 +42,10 @@ target_include_directories(zerooverhead
 
 target_compile_features(zerooverhead PUBLIC c_std_11)
 
+if (MSVC)
+  target_compile_options(zerooverhead PRIVATE /std:c11)
+endif()
+
 if (ZH_BUILD_TESTS)
   enable_testing()
   add_executable(zh_smoke tests/unit/test_smoke.c)
