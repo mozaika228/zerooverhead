@@ -1,6 +1,6 @@
 # ZeroOverhead
 
-ZeroOverhead is a research?grade, multi?language memory allocator project targeting near?zero metadata overhead, high throughput, and low tail latency under real workloads.
+ZeroOverhead is a research-grade, multi-language memory allocator project targeting near-zero metadata overhead, high throughput, and low tail latency under real workloads.
 
 This repository is intentionally structured for a full system allocator stack:
 - Core C allocator and platform glue
@@ -33,7 +33,7 @@ cmake --build build
 
 ## Roadmap (high level)
 1. Platform abstraction, page mapping, and alignment utilities
-2. Small object slabs and per?thread caches
+2. Small object slabs and per-thread caches
 3. Large object path (buddy / segregated free lists)
 4. Telemetry and safety guards
 5. Benchmarks and regression tests
