@@ -7,11 +7,20 @@
 
 #define ZH_CLASS_COUNT 7
 #define ZH_EMPTY_RETAIN 2u
+#define ZH_TLS_CACHE_LIMIT 64u
+#define ZH_TLS_CACHE_FLUSH 32u
 
 static const size_t g_class_sizes[ZH_CLASS_COUNT] = { 16, 32, 64, 128, 256, 512, 1024 };
 static zh_slab_class_t g_classes[ZH_CLASS_COUNT];
 static ZH_THREAD_LOCAL zh_slab_t* g_tls_current[ZH_CLASS_COUNT];
 static atomic_int g_classes_init = 0;
+
+typedef struct zh_tls_cache {
+  void* head;
+  uint32_t count;
+} zh_tls_cache_t;
+
+static ZH_THREAD_LOCAL zh_tls_cache_t g_tls_cache[ZH_CLASS_COUNT];
 
 static void zh_classes_init(void) {
   int expected = 0;
@@ -71,6 +80,7 @@ static zh_slab_t* zh_slab_create(size_t class_index) {
   slab->magic = ZH_SLAB_MAGIC;
   slab->class_index = (uint16_t)class_index;
   slab->block_size = (uint16_t)g_classes[class_index].block_size;
+  zh_spinlock_init(&slab->lock);
   slab->free_list = 0;
   slab->next = slab->prev = 0;
   slab->in_list = 0;
@@ -93,6 +103,68 @@ static zh_slab_t* zh_slab_create(size_t class_index) {
   return slab;
 }
 
+static void* zh_tls_cache_pop(size_t idx) {
+  zh_tls_cache_t* cache = &g_tls_cache[idx];
+  void* block = cache->head;
+  if (!block) return 0;
+  cache->head = *(void**)block;
+  cache->count--;
+  return block;
+}
+
+static void zh_tls_cache_push(size_t idx, void* block) {
+  zh_tls_cache_t* cache = &g_tls_cache[idx];
+  *(void**)block = cache->head;
+  cache->head = block;
+  cache->count++;
+}
+
+static void zh_flush_block_to_slab(zh_small_header_t* h) {
+  zh_slab_t* slab = (zh_slab_t*)h->slab;
+  zh_slab_class_t* cls = &g_classes[slab->class_index];
+
+  zh_spinlock_lock(&slab->lock);
+  *(void**)h = slab->free_list;
+  slab->free_list = h;
+  slab->free_count++;
+  uint32_t free_count = slab->free_count;
+  uint32_t total_count = slab->total_count;
+  zh_spinlock_unlock(&slab->lock);
+
+  if (free_count == 1) {
+    zh_spinlock_lock(&cls->lock);
+    if (!slab->in_list) zh_slab_list_push(cls, slab, ZH_SLAB_LIST_PARTIAL);
+    zh_spinlock_unlock(&cls->lock);
+  } else if (free_count == total_count) {
+    int do_unmap = 0;
+    zh_spinlock_lock(&cls->lock);
+    if (slab->in_list) zh_slab_list_remove(cls, slab);
+    if (cls->empty_count >= ZH_EMPTY_RETAIN) {
+      do_unmap = 1;
+    } else {
+      cls->empty_count++;
+      zh_slab_list_push(cls, slab, ZH_SLAB_LIST_EMPTY);
+    }
+    zh_spinlock_unlock(&cls->lock);
+
+    if (do_unmap) {
+      zh_stats_on_unmap(zh_core_slab_size());
+      zh_platform_unmap_aligned(slab);
+    }
+  }
+}
+
+static void zh_tls_cache_flush(size_t idx, uint32_t max_flush) {
+  zh_tls_cache_t* cache = &g_tls_cache[idx];
+  uint32_t flushed = 0;
+  while (cache->head && flushed < max_flush) {
+    void* block = zh_tls_cache_pop(idx);
+    zh_small_header_t* h = (zh_small_header_t*)block;
+    zh_flush_block_to_slab(h);
+    flushed++;
+  }
+}
+
 void* zh_alloc_small(size_t size) {
   if (size == 0) size = 1;
   zh_core_init_once();
@@ -102,8 +174,17 @@ void* zh_alloc_small(size_t size) {
   size_t idx = zh_class_index(total);
   if (idx == (size_t)-1) return 0;
 
+  void* cached = zh_tls_cache_pop(idx);
+  if (cached) {
+    zh_small_header_t* h = (zh_small_header_t*)cached;
+    h->magic = ZH_SMALL_MAGIC;
+    h->requested = (uint32_t)size;
+    zh_stats_on_alloc(size, ((zh_slab_t*)h->slab)->block_size);
+    return (void*)(h + 1);
+  }
+
   zh_slab_t* slab = g_tls_current[idx];
-  if (!slab || !slab->free_list) {
+  if (!slab) {
     zh_slab_class_t* cls = &g_classes[idx];
     zh_spinlock_lock(&cls->lock);
     slab = zh_slab_list_pop(cls, ZH_SLAB_LIST_PARTIAL);
@@ -115,11 +196,18 @@ void* zh_alloc_small(size_t size) {
   }
 
   if (!slab) return 0;
+  zh_spinlock_lock(&slab->lock);
   void* block = slab->free_list;
-  slab->free_list = *(void**)block;
-  slab->free_count--;
+  if (block) {
+    slab->free_list = *(void**)block;
+    slab->free_count--;
+  }
+  zh_spinlock_unlock(&slab->lock);
 
-  if (slab->free_count == 0) g_tls_current[idx] = 0;
+  if (!block) {
+    g_tls_current[idx] = 0;
+    return zh_alloc_small(size);
+  }
 
   zh_small_header_t* h = (zh_small_header_t*)block;
   h->magic = ZH_SMALL_MAGIC;
@@ -158,34 +246,12 @@ void zh_free_small(void* ptr) {
   if (h->magic != ZH_SMALL_MAGIC) return;
   zh_slab_t* slab = (zh_slab_t*)h->slab;
 
-  *(void**)h = slab->free_list;
-  slab->free_list = h;
-  uint32_t prev_free = slab->free_count;
-  slab->free_count++;
-
   zh_stats_on_free(h->requested, slab->block_size);
 
-  zh_slab_class_t* cls = &g_classes[slab->class_index];
-
-  if (slab->free_count == slab->total_count) {
-    if (g_tls_current[slab->class_index] == slab) g_tls_current[slab->class_index] = 0;
-    zh_spinlock_lock(&cls->lock);
-    if (cls->empty_count >= ZH_EMPTY_RETAIN) {
-      zh_spinlock_unlock(&cls->lock);
-      zh_stats_on_unmap(zh_core_slab_size());
-      zh_platform_unmap_aligned(slab);
-      return;
-    }
-    cls->empty_count++;
-    zh_slab_list_push(cls, slab, ZH_SLAB_LIST_EMPTY);
-    zh_spinlock_unlock(&cls->lock);
-    return;
-  }
-
-  if (prev_free == 0 && g_tls_current[slab->class_index] != slab) {
-    zh_spinlock_lock(&cls->lock);
-    if (!slab->in_list) zh_slab_list_push(cls, slab, ZH_SLAB_LIST_PARTIAL);
-    zh_spinlock_unlock(&cls->lock);
+  size_t idx = slab->class_index;
+  zh_tls_cache_push(idx, h);
+  if (g_tls_cache[idx].count > ZH_TLS_CACHE_LIMIT) {
+    zh_tls_cache_flush(idx, ZH_TLS_CACHE_FLUSH);
   }
 }
 
@@ -227,24 +293,39 @@ size_t zh_usable_large(void* ptr) {
 void zh_tls_shutdown(void) {
   zh_classes_init();
   for (size_t i = 0; i < ZH_CLASS_COUNT; i++) {
+    zh_tls_cache_flush(i, g_tls_cache[i].count);
+  }
+
+  for (size_t i = 0; i < ZH_CLASS_COUNT; i++) {
     zh_slab_t* slab = g_tls_current[i];
     if (!slab) continue;
     g_tls_current[i] = 0;
 
     zh_slab_class_t* cls = &g_classes[i];
-    zh_spinlock_lock(&cls->lock);
-    if (slab->free_count == slab->total_count) {
+    zh_spinlock_lock(&slab->lock);
+    uint32_t free_count = slab->free_count;
+    uint32_t total_count = slab->total_count;
+    zh_spinlock_unlock(&slab->lock);
+
+    if (free_count == total_count) {
+      int do_unmap = 0;
+      zh_spinlock_lock(&cls->lock);
       if (cls->empty_count >= ZH_EMPTY_RETAIN) {
-        zh_spinlock_unlock(&cls->lock);
+        do_unmap = 1;
+      } else {
+        cls->empty_count++;
+        zh_slab_list_push(cls, slab, ZH_SLAB_LIST_EMPTY);
+      }
+      zh_spinlock_unlock(&cls->lock);
+
+      if (do_unmap) {
         zh_stats_on_unmap(zh_core_slab_size());
         zh_platform_unmap_aligned(slab);
-        continue;
       }
-      cls->empty_count++;
-      zh_slab_list_push(cls, slab, ZH_SLAB_LIST_EMPTY);
-    } else if (slab->free_count > 0) {
+    } else if (free_count > 0) {
+      zh_spinlock_lock(&cls->lock);
       if (!slab->in_list) zh_slab_list_push(cls, slab, ZH_SLAB_LIST_PARTIAL);
+      zh_spinlock_unlock(&cls->lock);
     }
-    zh_spinlock_unlock(&cls->lock);
   }
 }
