@@ -38,5 +38,8 @@ cmake --build build
 4. Telemetry and safety guards
 5. Benchmarks and regression tests
 
+## Completion Criteria
+- Critical production-completion blocks are defined in `docs/architecture/critical-blocks.md`.
+
 ## License
 See `LICENSE`.
