@@ -40,6 +40,7 @@ void zh_core_init_once(void);
 void zh_init(void);
 void zh_shutdown(void);
 void zh_thread_shutdown(void);
+uint32_t zh_thread_id(void);
 
 void zh_cpu_relax(void);
 uint32_t zh_clz32(uint32_t v);

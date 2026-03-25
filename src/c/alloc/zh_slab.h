@@ -1,6 +1,7 @@
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include "../threads/zh_spinlock.h"
 
 typedef enum zh_slab_list_kind {
@@ -13,7 +14,9 @@ typedef struct zh_slab {
   uint64_t magic;
   uint16_t class_index;
   uint16_t block_size;
+  uint32_t owner_thread;
   zh_spinlock_t lock;
+  atomic_uintptr_t remote_head;
   uint32_t free_count;
   uint32_t total_count;
   uint8_t list_kind;

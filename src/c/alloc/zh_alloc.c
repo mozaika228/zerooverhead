@@ -80,7 +80,9 @@ static zh_slab_t* zh_slab_create(size_t class_index) {
   slab->magic = ZH_SLAB_MAGIC;
   slab->class_index = (uint16_t)class_index;
   slab->block_size = (uint16_t)g_classes[class_index].block_size;
+  slab->owner_thread = zh_thread_id();
   zh_spinlock_init(&slab->lock);
+  atomic_init(&slab->remote_head, (uintptr_t)0);
   slab->free_list = 0;
   slab->next = slab->prev = 0;
   slab->in_list = 0;
@@ -101,6 +103,48 @@ static zh_slab_t* zh_slab_create(size_t class_index) {
   }
   slab->free_list = (void*)start;
   return slab;
+}
+
+static void zh_slab_remote_push(zh_slab_t* slab, zh_small_header_t* h) {
+  uintptr_t head = atomic_load_explicit(&slab->remote_head, memory_order_acquire);
+  do {
+    *(void**)h = (void*)head;
+  } while (!atomic_compare_exchange_weak_explicit(
+    &slab->remote_head,
+    &head,
+    (uintptr_t)h,
+    memory_order_release,
+    memory_order_relaxed
+  ));
+}
+
+static void zh_slab_drain_remote(zh_slab_t* slab) {
+  uintptr_t head = atomic_exchange_explicit(&slab->remote_head, (uintptr_t)0, memory_order_acq_rel);
+  if (head == 0) return;
+
+  void* list = (void*)head;
+  uint32_t count = 0;
+  void* tail = list;
+  while (tail) {
+    count++;
+    void* next = *(void**)tail;
+    if (!next) break;
+    tail = next;
+  }
+
+  zh_spinlock_lock(&slab->lock);
+  uint32_t prev_free = slab->free_count;
+  *(void**)tail = slab->free_list;
+  slab->free_list = list;
+  slab->free_count += count;
+  zh_spinlock_unlock(&slab->lock);
+
+  if (prev_free == 0) {
+    zh_slab_class_t* cls = &g_classes[slab->class_index];
+    zh_spinlock_lock(&cls->lock);
+    if (!slab->in_list) zh_slab_list_push(cls, slab, ZH_SLAB_LIST_PARTIAL);
+    zh_spinlock_unlock(&cls->lock);
+  }
 }
 
 static void* zh_tls_cache_pop(size_t idx) {
@@ -174,6 +218,7 @@ void* zh_alloc_small(size_t size) {
   size_t idx = zh_class_index(total);
   if (idx == (size_t)-1) return 0;
 
+  uint32_t tid = zh_thread_id();
   void* cached = zh_tls_cache_pop(idx);
   if (cached) {
     zh_small_header_t* h = (zh_small_header_t*)cached;
@@ -192,10 +237,12 @@ void* zh_alloc_small(size_t size) {
     zh_spinlock_unlock(&cls->lock);
 
     if (!slab) slab = zh_slab_create(idx);
+    if (slab) slab->owner_thread = tid;
     g_tls_current[idx] = slab;
   }
 
   if (!slab) return 0;
+  zh_slab_drain_remote(slab);
   zh_spinlock_lock(&slab->lock);
   void* block = slab->free_list;
   if (block) {
@@ -247,6 +294,11 @@ void zh_free_small(void* ptr) {
   zh_slab_t* slab = (zh_slab_t*)h->slab;
 
   zh_stats_on_free(h->requested, slab->block_size);
+
+  if (slab->owner_thread != zh_thread_id()) {
+    zh_slab_remote_push(slab, h);
+    return;
+  }
 
   size_t idx = slab->class_index;
   zh_tls_cache_push(idx, h);
