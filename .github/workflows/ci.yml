@@ -18,3 +18,14 @@ jobs:
         run: cmake --build build ${{ matrix.os == 'windows-latest' && '--config Release' || '' }}
       - name: Test
         run: ctest --test-dir build --output-on-failure ${{ matrix.os == 'windows-latest' && '-C Release' || '' }}
+
+  tsan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure (TSAN)
+        run: cmake -S . -B build-tsan -DZH_ENABLE_TSAN=ON -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+      - name: Build (TSAN)
+        run: cmake --build build-tsan
+      - name: Test (TSAN)
+        run: ctest --test-dir build-tsan --output-on-failure

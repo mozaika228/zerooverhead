@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 project(zerooverhead C CXX)
 
 option(ZH_BUILD_TESTS "Build tests" ON)
+option(ZH_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
 
 add_library(zerooverhead
   src/c/zerooverhead.c
@@ -42,6 +43,11 @@ target_include_directories(zerooverhead
 
 target_compile_features(zerooverhead PUBLIC c_std_11)
 
+if (ZH_ENABLE_TSAN AND NOT MSVC)
+  target_compile_options(zerooverhead PRIVATE -fsanitize=thread -fno-omit-frame-pointer)
+  target_link_options(zerooverhead PRIVATE -fsanitize=thread)
+endif()
+
 if (MSVC)
   target_compile_options(zerooverhead PRIVATE /std:c11)
   target_compile_options(zerooverhead PRIVATE /experimental:c11atomics)
@@ -52,4 +58,20 @@ if (ZH_BUILD_TESTS)
   add_executable(zh_smoke tests/unit/test_smoke.c)
   target_link_libraries(zh_smoke zerooverhead)
   add_test(NAME zh_smoke COMMAND zh_smoke)
+
+  add_executable(zh_cross_thread tests/threaded/test_cross_thread.cpp)
+  target_compile_features(zh_cross_thread PRIVATE cxx_std_17)
+  target_link_libraries(zh_cross_thread zerooverhead)
+  add_test(NAME zh_cross_thread COMMAND zh_cross_thread)
+
+  add_executable(zh_perf_gate tests/latency/test_perf_gate.c)
+  target_link_libraries(zh_perf_gate zerooverhead)
+  add_test(NAME zh_perf_gate COMMAND zh_perf_gate)
+
+  if (ZH_ENABLE_TSAN AND NOT MSVC)
+    target_compile_options(zh_cross_thread PRIVATE -fsanitize=thread -fno-omit-frame-pointer)
+    target_link_options(zh_cross_thread PRIVATE -fsanitize=thread)
+    target_compile_options(zh_perf_gate PRIVATE -fsanitize=thread -fno-omit-frame-pointer)
+    target_link_options(zh_perf_gate PRIVATE -fsanitize=thread)
+  endif()
 endif()

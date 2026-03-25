@@ -144,12 +144,10 @@ static void zh_slab_drain_remote(zh_slab_t* slab) {
     tail = next;
   }
 
-  zh_spinlock_lock(&slab->lock);
   uint32_t prev_free = slab->free_count;
   *(void**)tail = slab->free_list;
   slab->free_list = list;
   slab->free_count += count;
-  zh_spinlock_unlock(&slab->lock);
 
   if (prev_free == 0) {
     zh_slab_class_t* cls = &g_classes[slab->class_index];
@@ -183,14 +181,12 @@ static void zh_flush_block_to_slab(zh_small_header_t* h) {
   zh_slab_t* slab = (zh_slab_t*)h->slab;
   zh_slab_class_t* cls = &g_classes[slab->class_index];
 
-  zh_spinlock_lock(&slab->lock);
   h->magic = ZH_FREED_MAGIC;
   *(void**)h = slab->free_list;
   slab->free_list = h;
   slab->free_count++;
   uint32_t free_count = slab->free_count;
   uint32_t total_count = slab->total_count;
-  zh_spinlock_unlock(&slab->lock);
 
   if (free_count == 1) {
     zh_spinlock_lock(&cls->lock);
@@ -330,13 +326,11 @@ void* zh_alloc_small(size_t size) {
 
   if (!slab) return 0;
   zh_slab_drain_remote(slab);
-  zh_spinlock_lock(&slab->lock);
   void* block = slab->free_list;
   if (block) {
     slab->free_list = *(void**)block;
     slab->free_count--;
   }
-  zh_spinlock_unlock(&slab->lock);
 
   if (!block) {
     g_tls_current[idx] = 0;
@@ -474,10 +468,8 @@ void zh_tls_shutdown(void) {
     g_tls_current[i] = 0;
 
     zh_slab_class_t* cls = &g_classes[i];
-    zh_spinlock_lock(&slab->lock);
     uint32_t free_count = slab->free_count;
     uint32_t total_count = slab->total_count;
-    zh_spinlock_unlock(&slab->lock);
 
     if (free_count == total_count) {
       int do_unmap = 0;

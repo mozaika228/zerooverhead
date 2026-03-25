@@ -15,6 +15,8 @@ typedef struct zh_medium_run {
 typedef struct zh_medium_bin {
   size_t block_size;
   zh_medium_header_t* free_list;
+  zh_medium_header_t* retired_list;
+  uint32_t retired_count;
 } zh_medium_bin_t;
 
 typedef struct zh_medium_arena {
@@ -39,6 +41,8 @@ static void zh_medium_init_once(void) {
     for (size_t i = 0; i < ZH_MEDIUM_CLASS_COUNT; i++) {
       g_medium_arenas[a].bins[i].block_size = g_medium_sizes[i];
       g_medium_arenas[a].bins[i].free_list = 0;
+      g_medium_arenas[a].bins[i].retired_list = 0;
+      g_medium_arenas[a].bins[i].retired_count = 0;
     }
   }
 }
@@ -75,6 +79,7 @@ static int zh_medium_grow_bin(zh_medium_arena_t* arena, uint16_t arena_idx, uint
     zh_medium_header_t* h = (zh_medium_header_t*)p;
     h->magic = ZH_MEDIUM_MAGIC;
     h->requested = 0;
+    h->retired_epoch = 0;
     h->arena_idx = arena_idx;
     h->class_idx = class_idx;
     h->next = arena->bins[class_idx].free_list;
@@ -82,6 +87,34 @@ static int zh_medium_grow_bin(zh_medium_arena_t* arena, uint16_t arena_idx, uint
     p += block_size;
   }
   return 1;
+}
+
+static void zh_medium_reclaim_epoch(zh_medium_bin_t* bin, uint32_t max_reclaim) {
+  uint64_t min_epoch = zh_epoch_min_active();
+  zh_medium_header_t* cur = bin->retired_list;
+  zh_medium_header_t* keep = 0;
+  uint32_t kept = 0;
+  uint32_t reclaimed = 0;
+
+  while (cur) {
+    zh_medium_header_t* next = cur->next;
+    uint64_t retire_epoch = (uint64_t)cur->retired_epoch;
+    int can_reclaim = (retire_epoch == 0) || (min_epoch == 0) || (min_epoch > (retire_epoch + 1));
+    if (can_reclaim && reclaimed < max_reclaim) {
+      cur->next = bin->free_list;
+      bin->free_list = cur;
+      reclaimed++;
+    } else {
+      cur->next = keep;
+      keep = cur;
+      kept++;
+    }
+    cur = next;
+  }
+
+  bin->retired_list = keep;
+  bin->retired_count = kept;
+  zh_stats_on_quarantine(kept);
 }
 
 void* zh_alloc_medium(size_t size) {
@@ -95,20 +128,23 @@ void* zh_alloc_medium(size_t size) {
   zh_medium_arena_t* arena = &g_medium_arenas[arena_idx];
 
   zh_spinlock_lock(&arena->lock);
-  zh_medium_header_t* h = arena->bins[class_idx].free_list;
+  zh_medium_bin_t* bin = &arena->bins[class_idx];
+  zh_medium_reclaim_epoch(bin, 64);
+  zh_medium_header_t* h = bin->free_list;
   if (!h) {
     if (!zh_medium_grow_bin(arena, arena_idx, (uint16_t)class_idx)) {
       zh_spinlock_unlock(&arena->lock);
       return 0;
     }
-    h = arena->bins[class_idx].free_list;
+    h = bin->free_list;
   }
-  arena->bins[class_idx].free_list = h->next;
+  bin->free_list = h->next;
   h->magic = ZH_MEDIUM_MAGIC;
   h->requested = (uint32_t)size;
+  h->retired_epoch = 0;
   zh_spinlock_unlock(&arena->lock);
 
-  zh_stats_on_alloc(size, arena->bins[class_idx].block_size - sizeof(zh_medium_header_t));
+  zh_stats_on_alloc(size, bin->block_size - sizeof(zh_medium_header_t));
   return (void*)(h + 1);
 }
 
@@ -128,12 +164,24 @@ void zh_free_medium(void* ptr) {
   }
   zh_medium_arena_t* arena = &g_medium_arenas[arena_idx];
   zh_spinlock_lock(&arena->lock);
+  zh_medium_bin_t* bin = &arena->bins[class_idx];
+  uint32_t requested = h->requested;
   h->magic = ZH_FREED_MAGIC;
-  h->next = arena->bins[class_idx].free_list;
-  arena->bins[class_idx].free_list = h;
+  if (zh_mode_is_hardened()) {
+    h->retired_epoch = (uint32_t)zh_epoch_advance();
+    h->next = bin->retired_list;
+    bin->retired_list = h;
+    bin->retired_count++;
+    zh_stats_on_quarantine(bin->retired_count);
+    zh_medium_reclaim_epoch(bin, 32);
+  } else {
+    h->retired_epoch = 0;
+    h->next = bin->free_list;
+    bin->free_list = h;
+  }
   zh_spinlock_unlock(&arena->lock);
 
-  zh_stats_on_free(h->requested, arena->bins[class_idx].block_size - sizeof(zh_medium_header_t));
+  zh_stats_on_free(requested, bin->block_size - sizeof(zh_medium_header_t));
 }
 
 size_t zh_usable_medium(void* ptr) {

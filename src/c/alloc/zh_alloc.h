@@ -19,6 +19,7 @@ typedef struct zh_large_header {
 typedef struct zh_medium_header {
   uint64_t magic;
   uint32_t requested;
+  uint32_t retired_epoch;
   uint16_t arena_idx;
   uint16_t class_idx;
   struct zh_medium_header* next;
