@@ -32,14 +32,26 @@ static ZH_THREAD_LOCAL uint32_t g_tls_ops = 0;
 static atomic_ullong g_maintenance_epoch = 1;
 
 static void zh_classes_init(void) {
+  int state = atomic_load_explicit(&g_classes_init, memory_order_acquire);
+  if (state == 2) return;
+
   int expected = 0;
-  if (!atomic_compare_exchange_strong(&g_classes_init, &expected, 1)) return;
-  for (size_t i = 0; i < ZH_CLASS_COUNT; i++) {
-    g_classes[i].block_size = g_class_sizes[i];
-    g_classes[i].partial = 0;
-    g_classes[i].empty = 0;
-    g_classes[i].empty_count = 0;
-    zh_spinlock_init(&g_classes[i].lock);
+  if (atomic_compare_exchange_strong_explicit(
+    &g_classes_init, &expected, 1, memory_order_acq_rel, memory_order_acquire
+  )) {
+    for (size_t i = 0; i < ZH_CLASS_COUNT; i++) {
+      g_classes[i].block_size = g_class_sizes[i];
+      g_classes[i].partial = 0;
+      g_classes[i].empty = 0;
+      g_classes[i].empty_count = 0;
+      zh_spinlock_init(&g_classes[i].lock);
+    }
+    atomic_store_explicit(&g_classes_init, 2, memory_order_release);
+    return;
+  }
+
+  while (atomic_load_explicit(&g_classes_init, memory_order_acquire) != 2) {
+    zh_cpu_relax();
   }
 }
 

@@ -33,17 +33,29 @@ static zh_medium_arena_t g_medium_arenas[ZH_MEDIUM_ARENA_COUNT];
 static atomic_int g_medium_init = 0;
 
 static void zh_medium_init_once(void) {
+  int state = atomic_load_explicit(&g_medium_init, memory_order_acquire);
+  if (state == 2) return;
+
   int expected = 0;
-  if (!atomic_compare_exchange_strong(&g_medium_init, &expected, 1)) return;
-  for (size_t a = 0; a < ZH_MEDIUM_ARENA_COUNT; a++) {
-    zh_spinlock_init(&g_medium_arenas[a].lock);
-    g_medium_arenas[a].runs = 0;
-    for (size_t i = 0; i < ZH_MEDIUM_CLASS_COUNT; i++) {
-      g_medium_arenas[a].bins[i].block_size = g_medium_sizes[i];
-      g_medium_arenas[a].bins[i].free_list = 0;
-      g_medium_arenas[a].bins[i].retired_list = 0;
-      g_medium_arenas[a].bins[i].retired_count = 0;
+  if (atomic_compare_exchange_strong_explicit(
+    &g_medium_init, &expected, 1, memory_order_acq_rel, memory_order_acquire
+  )) {
+    for (size_t a = 0; a < ZH_MEDIUM_ARENA_COUNT; a++) {
+      zh_spinlock_init(&g_medium_arenas[a].lock);
+      g_medium_arenas[a].runs = 0;
+      for (size_t i = 0; i < ZH_MEDIUM_CLASS_COUNT; i++) {
+        g_medium_arenas[a].bins[i].block_size = g_medium_sizes[i];
+        g_medium_arenas[a].bins[i].free_list = 0;
+        g_medium_arenas[a].bins[i].retired_list = 0;
+        g_medium_arenas[a].bins[i].retired_count = 0;
+      }
     }
+    atomic_store_explicit(&g_medium_init, 2, memory_order_release);
+    return;
+  }
+
+  while (atomic_load_explicit(&g_medium_init, memory_order_acquire) != 2) {
+    zh_cpu_relax();
   }
 }
 
