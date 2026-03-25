@@ -46,6 +46,10 @@ void zh_shutdown(void);
 void zh_thread_shutdown(void);
 uint32_t zh_thread_id(void);
 int zh_mode_is_hardened(void);
+void zh_epoch_enter(void);
+void zh_epoch_leave(void);
+uint64_t zh_epoch_advance(void);
+uint64_t zh_epoch_min_active(void);
 
 void zh_cpu_relax(void);
 uint32_t zh_clz32(uint32_t v);

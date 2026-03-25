@@ -18,29 +18,38 @@ int zh_mode_is_hardened(void) {
 }
 
 void* zh_malloc(size_t size) {
+  zh_epoch_enter();
+  void* out = 0;
   if (size <= ZH_SMALL_MAX) {
     void* p = zh_alloc_small(size);
-    if (p) return p;
+    if (p) { out = p; goto done; }
   } else if (size <= ZH_MEDIUM_MAX) {
     void* p = zh_alloc_medium(size);
-    if (p) return p;
+    if (p) { out = p; goto done; }
   }
-  return zh_alloc_large(size);
+  out = zh_alloc_large(size);
+done:
+  zh_epoch_leave();
+  return out;
 }
 
 void zh_free(void* ptr) {
   if (!ptr) return;
+  zh_epoch_enter();
   zh_small_header_t* h = ((zh_small_header_t*)ptr) - 1;
   if (h->magic == ZH_SMALL_MAGIC) {
     zh_free_small(ptr);
+    zh_epoch_leave();
     return;
   }
   zh_medium_header_t* m = ((zh_medium_header_t*)ptr) - 1;
   if (m->magic == ZH_MEDIUM_MAGIC) {
     zh_free_medium(ptr);
+    zh_epoch_leave();
     return;
   }
   zh_free_large(ptr);
+  zh_epoch_leave();
 }
 
 void* zh_realloc(void* ptr, size_t size) {
@@ -61,9 +70,14 @@ void* zh_realloc(void* ptr, size_t size) {
 
 size_t zh_usable_size(void* ptr) {
   if (!ptr) return 0;
+  zh_epoch_enter();
+  size_t out = 0;
   zh_small_header_t* h = ((zh_small_header_t*)ptr) - 1;
-  if (h->magic == ZH_SMALL_MAGIC) return zh_usable_small(ptr);
+  if (h->magic == ZH_SMALL_MAGIC) { out = zh_usable_small(ptr); goto done; }
   zh_medium_header_t* m = ((zh_medium_header_t*)ptr) - 1;
-  if (m->magic == ZH_MEDIUM_MAGIC) return zh_usable_medium(ptr);
-  return zh_usable_large(ptr);
+  if (m->magic == ZH_MEDIUM_MAGIC) { out = zh_usable_medium(ptr); goto done; }
+  out = zh_usable_large(ptr);
+done:
+  zh_epoch_leave();
+  return out;
 }

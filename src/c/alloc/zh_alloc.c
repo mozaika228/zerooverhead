@@ -229,15 +229,29 @@ static void zh_tls_cache_flush(size_t idx, uint32_t max_flush) {
 
 static void zh_tls_quarantine_flush(size_t idx, uint32_t max_flush) {
   zh_tls_cache_t* q = &g_tls_quarantine[idx];
+  uint64_t min_epoch = zh_epoch_min_active();
   uint32_t flushed = 0;
-  while (q->head && flushed < max_flush) {
-    void* block = q->head;
-    q->head = *(void**)block;
-    q->count--;
-    zh_small_header_t* h = (zh_small_header_t*)block;
-    zh_flush_block_to_slab(h);
-    flushed++;
+  void* cur = q->head;
+  void* keep = 0;
+  uint32_t kept = 0;
+  while (cur) {
+    void* next = *(void**)cur;
+    zh_small_header_t* h = (zh_small_header_t*)cur;
+    uint64_t retire_epoch = (uint64_t)h->reserved;
+    int can_reclaim = (retire_epoch == 0) || (min_epoch == 0) || (min_epoch > (retire_epoch + 1));
+
+    if (flushed < max_flush && can_reclaim) {
+      zh_flush_block_to_slab(h);
+      flushed++;
+    } else {
+      *(void**)cur = keep;
+      keep = cur;
+      kept++;
+    }
+    cur = next;
   }
+  q->head = keep;
+  q->count = kept;
   zh_stats_on_quarantine(q->count);
 }
 
@@ -296,6 +310,7 @@ void* zh_alloc_small(size_t size) {
     zh_small_header_t* h = (zh_small_header_t*)cached;
     h->magic = ZH_SMALL_MAGIC;
     h->requested = (uint32_t)size;
+    h->reserved = 0;
     zh_stats_on_alloc(size, ((zh_slab_t*)h->slab)->block_size);
     return (void*)(h + 1);
   }
@@ -332,6 +347,7 @@ void* zh_alloc_small(size_t size) {
   h->magic = ZH_SMALL_MAGIC;
   h->slab = slab;
   h->requested = (uint32_t)size;
+  h->reserved = 0;
 
   zh_stats_on_alloc(size, slab->block_size);
   zh_maintenance_tick();
@@ -388,6 +404,7 @@ void zh_free_small(void* ptr) {
   size_t idx = slab->class_index;
   if (zh_mode_is_hardened()) {
     h->magic = ZH_FREED_MAGIC;
+    h->reserved = (uint32_t)zh_epoch_advance();
     *(void**)h = g_tls_quarantine[idx].head;
     g_tls_quarantine[idx].head = h;
     g_tls_quarantine[idx].count++;
