@@ -19,6 +19,7 @@ typedef struct zh_slab {
   atomic_uintptr_t remote_head;
   uint32_t free_count;
   uint32_t total_count;
+  uint64_t empty_epoch;
   uint8_t list_kind;
   uint8_t in_list;
   uint16_t reserved;

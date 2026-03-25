@@ -4,11 +4,17 @@
 #include "../zh_internal.h"
 #include "../utils/zh_align.h"
 #include "../platform/zh_platform.h"
+#include "zerooverhead/zh_stats.h"
 
 #define ZH_CLASS_COUNT 7
 #define ZH_EMPTY_RETAIN 2u
 #define ZH_TLS_CACHE_LIMIT 64u
 #define ZH_TLS_CACHE_FLUSH 32u
+#define ZH_TLS_QUARANTINE_LIMIT 64u
+#define ZH_TLS_QUARANTINE_FLUSH 32u
+#define ZH_MAINTENANCE_PERIOD 256u
+#define ZH_SCAVENGE_DECAY_TICKS 200000ull
+#define ZH_RSS_CAP_BYTES (512ull * 1024ull * 1024ull)
 
 static const size_t g_class_sizes[ZH_CLASS_COUNT] = { 16, 32, 64, 128, 256, 512, 1024 };
 static zh_slab_class_t g_classes[ZH_CLASS_COUNT];
@@ -21,6 +27,9 @@ typedef struct zh_tls_cache {
 } zh_tls_cache_t;
 
 static ZH_THREAD_LOCAL zh_tls_cache_t g_tls_cache[ZH_CLASS_COUNT];
+static ZH_THREAD_LOCAL zh_tls_cache_t g_tls_quarantine[ZH_CLASS_COUNT];
+static ZH_THREAD_LOCAL uint32_t g_tls_ops = 0;
+static atomic_ullong g_maintenance_epoch = 1;
 
 static void zh_classes_init(void) {
   int expected = 0;
@@ -94,6 +103,7 @@ static zh_slab_t* zh_slab_create(size_t class_index) {
   size_t blocks = usable / slab->block_size;
   slab->total_count = (uint32_t)blocks;
   slab->free_count = (uint32_t)blocks;
+  slab->empty_epoch = 0;
 
   uint8_t* p = (uint8_t*)start;
   for (size_t i = 0; i < blocks; i++) {
@@ -106,6 +116,7 @@ static zh_slab_t* zh_slab_create(size_t class_index) {
 }
 
 static void zh_slab_remote_push(zh_slab_t* slab, zh_small_header_t* h) {
+  h->magic = ZH_FREED_MAGIC;
   uintptr_t head = atomic_load_explicit(&slab->remote_head, memory_order_acquire);
   do {
     *(void**)h = (void*)head;
@@ -116,6 +127,7 @@ static void zh_slab_remote_push(zh_slab_t* slab, zh_small_header_t* h) {
     memory_order_release,
     memory_order_relaxed
   ));
+  zh_stats_on_remote_free();
 }
 
 static void zh_slab_drain_remote(zh_slab_t* slab) {
@@ -163,11 +175,16 @@ static void zh_tls_cache_push(size_t idx, void* block) {
   cache->count++;
 }
 
+static void zh_set_empty_epoch(zh_slab_t* slab) {
+  slab->empty_epoch = atomic_load_explicit(&g_maintenance_epoch, memory_order_relaxed);
+}
+
 static void zh_flush_block_to_slab(zh_small_header_t* h) {
   zh_slab_t* slab = (zh_slab_t*)h->slab;
   zh_slab_class_t* cls = &g_classes[slab->class_index];
 
   zh_spinlock_lock(&slab->lock);
+  h->magic = ZH_FREED_MAGIC;
   *(void**)h = slab->free_list;
   slab->free_list = h;
   slab->free_count++;
@@ -186,6 +203,7 @@ static void zh_flush_block_to_slab(zh_small_header_t* h) {
     if (cls->empty_count >= ZH_EMPTY_RETAIN) {
       do_unmap = 1;
     } else {
+      zh_set_empty_epoch(slab);
       cls->empty_count++;
       zh_slab_list_push(cls, slab, ZH_SLAB_LIST_EMPTY);
     }
@@ -206,6 +224,60 @@ static void zh_tls_cache_flush(size_t idx, uint32_t max_flush) {
     zh_small_header_t* h = (zh_small_header_t*)block;
     zh_flush_block_to_slab(h);
     flushed++;
+  }
+}
+
+static void zh_tls_quarantine_flush(size_t idx, uint32_t max_flush) {
+  zh_tls_cache_t* q = &g_tls_quarantine[idx];
+  uint32_t flushed = 0;
+  while (q->head && flushed < max_flush) {
+    void* block = q->head;
+    q->head = *(void**)block;
+    q->count--;
+    zh_small_header_t* h = (zh_small_header_t*)block;
+    zh_flush_block_to_slab(h);
+    flushed++;
+  }
+  zh_stats_on_quarantine(q->count);
+}
+
+static void zh_maintenance_scavenge(void) {
+  zh_stats_t st;
+  zh_stats_get(&st);
+  uint64_t now = atomic_load_explicit(&g_maintenance_epoch, memory_order_relaxed);
+  int over_cap = st.bytes_mapped > ZH_RSS_CAP_BYTES;
+  uint32_t released = 0;
+  size_t slab_size = zh_core_slab_size();
+
+  for (size_t i = 0; i < ZH_CLASS_COUNT && released < 2; i++) {
+    zh_slab_class_t* cls = &g_classes[i];
+    zh_spinlock_lock(&cls->lock);
+    zh_slab_t* cur = cls->empty;
+    while (cur && released < 2) {
+      zh_slab_t* next = cur->next;
+      uint64_t age = now - cur->empty_epoch;
+      if (over_cap || age >= ZH_SCAVENGE_DECAY_TICKS) {
+        zh_slab_list_remove(cls, cur);
+        if (cls->empty_count > 0) cls->empty_count--;
+        zh_spinlock_unlock(&cls->lock);
+        zh_stats_on_unmap(slab_size);
+        zh_platform_unmap_aligned(cur);
+        released++;
+        zh_spinlock_lock(&cls->lock);
+        cur = cls->empty;
+        continue;
+      }
+      cur = next;
+    }
+    zh_spinlock_unlock(&cls->lock);
+  }
+}
+
+static void zh_maintenance_tick(void) {
+  g_tls_ops++;
+  atomic_fetch_add_explicit(&g_maintenance_epoch, 1, memory_order_relaxed);
+  if (g_tls_ops % ZH_MAINTENANCE_PERIOD == 0) {
+    zh_maintenance_scavenge();
   }
 }
 
@@ -262,6 +334,7 @@ void* zh_alloc_small(size_t size) {
   h->requested = (uint32_t)size;
 
   zh_stats_on_alloc(size, slab->block_size);
+  zh_maintenance_tick();
   return (void*)(h + 1);
 }
 
@@ -269,11 +342,14 @@ void* zh_alloc_large(size_t size) {
   if (size == 0) size = 1;
   zh_core_init_once();
 
-  size_t usable = 0;
-  void* buddy = zh_buddy_alloc(size, &usable);
-  if (buddy) {
-    zh_stats_on_alloc(size, usable);
-    return buddy;
+  if (size < ZH_HUGE_THRESHOLD) {
+    size_t usable = 0;
+    void* buddy = zh_buddy_alloc(size, &usable);
+    if (buddy) {
+      zh_stats_on_alloc(size, usable);
+      zh_maintenance_tick();
+      return buddy;
+    }
   }
 
   size_t total = size + sizeof(zh_large_header_t);
@@ -284,27 +360,49 @@ void* zh_alloc_large(size_t size) {
   h->magic = ZH_LARGE_MAGIC;
   h->size = size;
   zh_stats_on_alloc(size, size);
+  zh_maintenance_tick();
   return (void*)(h + 1);
 }
 
 void zh_free_small(void* ptr) {
   if (!ptr) return;
   zh_small_header_t* h = ((zh_small_header_t*)ptr) - 1;
-  if (h->magic != ZH_SMALL_MAGIC) return;
+  if (h->magic == ZH_FREED_MAGIC) {
+    zh_stats_on_invalid_free();
+    return;
+  }
+  if (h->magic != ZH_SMALL_MAGIC) {
+    zh_stats_on_invalid_free();
+    return;
+  }
   zh_slab_t* slab = (zh_slab_t*)h->slab;
 
   zh_stats_on_free(h->requested, slab->block_size);
 
   if (slab->owner_thread != zh_thread_id()) {
     zh_slab_remote_push(slab, h);
+    zh_maintenance_tick();
     return;
   }
 
   size_t idx = slab->class_index;
-  zh_tls_cache_push(idx, h);
-  if (g_tls_cache[idx].count > ZH_TLS_CACHE_LIMIT) {
-    zh_tls_cache_flush(idx, ZH_TLS_CACHE_FLUSH);
+  if (zh_mode_is_hardened()) {
+    h->magic = ZH_FREED_MAGIC;
+    *(void**)h = g_tls_quarantine[idx].head;
+    g_tls_quarantine[idx].head = h;
+    g_tls_quarantine[idx].count++;
+    zh_stats_on_quarantine(g_tls_quarantine[idx].count);
+    if (g_tls_quarantine[idx].count > ZH_TLS_QUARANTINE_LIMIT) {
+      zh_tls_quarantine_flush(idx, ZH_TLS_QUARANTINE_FLUSH);
+    }
+  } else {
+    h->magic = ZH_FREED_MAGIC;
+    zh_tls_cache_push(idx, h);
+    if (g_tls_cache[idx].count > ZH_TLS_CACHE_LIMIT) {
+      zh_tls_cache_flush(idx, ZH_TLS_CACHE_FLUSH);
+    }
   }
+  zh_maintenance_tick();
 }
 
 void zh_free_large(void* ptr) {
@@ -314,6 +412,7 @@ void zh_free_large(void* ptr) {
     size_t usable = ((size_t)1 << b->order) - sizeof(zh_buddy_header_t);
     zh_stats_on_free(b->requested, usable);
     zh_buddy_free(ptr);
+    zh_maintenance_tick();
     return;
   }
   zh_large_header_t* h = ((zh_large_header_t*)ptr) - 1;
@@ -321,7 +420,10 @@ void zh_free_large(void* ptr) {
     zh_stats_on_free(h->size, h->size);
     zh_stats_on_unmap(h->size + sizeof(zh_large_header_t));
     zh_platform_unmap((void*)h, h->size + sizeof(zh_large_header_t));
+    zh_maintenance_tick();
+    return;
   }
+  zh_stats_on_invalid_free();
 }
 
 size_t zh_usable_small(void* ptr) {
@@ -345,6 +447,7 @@ size_t zh_usable_large(void* ptr) {
 void zh_tls_shutdown(void) {
   zh_classes_init();
   for (size_t i = 0; i < ZH_CLASS_COUNT; i++) {
+    zh_tls_quarantine_flush(i, g_tls_quarantine[i].count);
     zh_tls_cache_flush(i, g_tls_cache[i].count);
   }
 
@@ -365,6 +468,7 @@ void zh_tls_shutdown(void) {
       if (cls->empty_count >= ZH_EMPTY_RETAIN) {
         do_unmap = 1;
       } else {
+        zh_set_empty_epoch(slab);
         cls->empty_count++;
         zh_slab_list_push(cls, slab, ZH_SLAB_LIST_EMPTY);
       }

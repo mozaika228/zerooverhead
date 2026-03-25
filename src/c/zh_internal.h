@@ -25,9 +25,13 @@
 #define ZH_SLAB_MAGIC 0x5A484C534C41424Cull
 #define ZH_SMALL_MAGIC 0x5A48534D414C4C4Cull
 #define ZH_LARGE_MAGIC 0x5A484C4C41524745ull
+#define ZH_MEDIUM_MAGIC 0x5A484D454449554Dull
 #define ZH_BUDDY_MAGIC 0x5A48425544445900ull
 #define ZH_BUDDY_FREE_MAGIC 0x5A484255444459FFull
+#define ZH_FREED_MAGIC 0x5A48465245454400ull
 #define ZH_SMALL_MAX 1024u
+#define ZH_MEDIUM_MAX 65536u
+#define ZH_HUGE_THRESHOLD (2u * 1024u * 1024u)
 #define ZH_SLAB_SIZE_DEFAULT (64u * 1024u)
 
 static ZH_INLINE size_t zh_min_size(size_t a, size_t b) { return a < b ? a : b; }
@@ -41,6 +45,7 @@ void zh_init(void);
 void zh_shutdown(void);
 void zh_thread_shutdown(void);
 uint32_t zh_thread_id(void);
+int zh_mode_is_hardened(void);
 
 void zh_cpu_relax(void);
 uint32_t zh_clz32(uint32_t v);
@@ -50,3 +55,6 @@ void zh_stats_on_alloc(size_t requested, size_t allocated);
 void zh_stats_on_free(size_t requested, size_t allocated);
 void zh_stats_on_map(size_t size);
 void zh_stats_on_unmap(size_t size);
+void zh_stats_on_remote_free(void);
+void zh_stats_on_quarantine(size_t count);
+void zh_stats_on_invalid_free(void);

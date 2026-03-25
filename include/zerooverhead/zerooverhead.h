@@ -10,9 +10,16 @@
 extern "C" {
 #endif
 
+typedef enum zh_mode {
+  ZH_MODE_PERF = 0,
+  ZH_MODE_HARDENED = 1
+} zh_mode_t;
+
 void  zh_init(void);
 void  zh_shutdown(void);
 void  zh_thread_shutdown(void);
+void  zh_set_mode(zh_mode_t mode);
+zh_mode_t zh_get_mode(void);
 
 void* zh_malloc(size_t size);
 void  zh_free(void* ptr);

@@ -1,10 +1,30 @@
 #include "zerooverhead/zerooverhead.h"
 #include "alloc/zh_alloc.h"
 #include "zh_internal.h"
+#include <stdatomic.h>
+
+static atomic_int g_mode = ZH_MODE_PERF;
+
+void zh_set_mode(zh_mode_t mode) {
+  atomic_store_explicit(&g_mode, (int)mode, memory_order_relaxed);
+}
+
+zh_mode_t zh_get_mode(void) {
+  return (zh_mode_t)atomic_load_explicit(&g_mode, memory_order_relaxed);
+}
+
+int zh_mode_is_hardened(void) {
+  return zh_get_mode() == ZH_MODE_HARDENED;
+}
 
 void* zh_malloc(size_t size) {
-  void* p = zh_alloc_small(size);
-  if (p) return p;
+  if (size <= ZH_SMALL_MAX) {
+    void* p = zh_alloc_small(size);
+    if (p) return p;
+  } else if (size <= ZH_MEDIUM_MAX) {
+    void* p = zh_alloc_medium(size);
+    if (p) return p;
+  }
   return zh_alloc_large(size);
 }
 
@@ -15,11 +35,12 @@ void zh_free(void* ptr) {
     zh_free_small(ptr);
     return;
   }
-  zh_large_header_t* l = ((zh_large_header_t*)ptr) - 1;
-  if (l->magic == ZH_LARGE_MAGIC) {
-    zh_free_large(ptr);
+  zh_medium_header_t* m = ((zh_medium_header_t*)ptr) - 1;
+  if (m->magic == ZH_MEDIUM_MAGIC) {
+    zh_free_medium(ptr);
     return;
   }
+  zh_free_large(ptr);
 }
 
 void* zh_realloc(void* ptr, size_t size) {
@@ -42,7 +63,7 @@ size_t zh_usable_size(void* ptr) {
   if (!ptr) return 0;
   zh_small_header_t* h = ((zh_small_header_t*)ptr) - 1;
   if (h->magic == ZH_SMALL_MAGIC) return zh_usable_small(ptr);
-  zh_large_header_t* l = ((zh_large_header_t*)ptr) - 1;
-  if (l->magic == ZH_LARGE_MAGIC) return zh_usable_large(ptr);
-  return 0;
+  zh_medium_header_t* m = ((zh_medium_header_t*)ptr) - 1;
+  if (m->magic == ZH_MEDIUM_MAGIC) return zh_usable_medium(ptr);
+  return zh_usable_large(ptr);
 }
