@@ -69,6 +69,8 @@ if (ZH_BUILD_TESTS)
   add_test(NAME zh_perf_gate COMMAND zh_perf_gate)
 
   if (ZH_ENABLE_TSAN AND NOT MSVC)
+    target_compile_options(zh_smoke PRIVATE -fsanitize=thread -fno-omit-frame-pointer)
+    target_link_options(zh_smoke PRIVATE -fsanitize=thread)
     target_compile_options(zh_cross_thread PRIVATE -fsanitize=thread -fno-omit-frame-pointer)
     target_link_options(zh_cross_thread PRIVATE -fsanitize=thread)
     target_compile_options(zh_perf_gate PRIVATE -fsanitize=thread -fno-omit-frame-pointer)
