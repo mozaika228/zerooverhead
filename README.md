@@ -1,15 +1,13 @@
 # ZeroOverhead
 
-ZeroOverhead is a research-grade, multi-language memory allocator project targeting near-zero metadata overhead, high throughput, and low tail latency under real workloads.
+ZeroOverhead is a custom allocator project with a working C allocator core and multi-language repository layout.
 
-This repository is intentionally structured for a full system allocator stack:
-- Core C allocator and platform glue
-- C++ policy and API layer
-- Rust crate wrapping the C core
-- Python package for experiments
-- Benchmarks, fuzzing, and stress tests
-
-Status: scaffolded. Implementation starts with the C core.
+Current state:
+- C API is available: `zh_malloc`, `zh_free`, `zh_realloc`, `zh_usable_size`, `zh_init`, `zh_shutdown`, `zh_thread_shutdown`.
+- Small allocations use slab classes with thread-local caching and class-level lists.
+- Large allocations use buddy allocator path with fallback direct OS mapping.
+- Basic telemetry counters are implemented (`zh_stats_get`).
+- CI build/test workflow exists for Linux and Windows.
 
 ## Layout
 - `include/zerooverhead/` public C API and headers
@@ -23,23 +21,33 @@ Status: scaffolded. Implementation starts with the C core.
 - `tools/` scripts, tracing, analysis, CI helpers
 - `docs/` architecture, performance, and security notes
 
-## Build (C core)
-This is a placeholder build configuration. It will be expanded as the allocator matures.
+## Build
 
 ```bash
 cmake -S . -B build
 cmake --build build
 ```
 
-## Roadmap (high level)
-1. Platform abstraction, page mapping, and alignment utilities
-2. Small object slabs and per-thread caches
-3. Large object path (buddy / segregated free lists)
-4. Telemetry and safety guards
-5. Benchmarks and regression tests
+## Test
 
-## Completion Criteria
-- Critical production-completion blocks are defined in `docs/architecture/critical-blocks.md`.
+```bash
+ctest --test-dir build --output-on-failure
+```
+
+On multi-config generators (Visual Studio), run:
+
+```bash
+ctest --test-dir build -C Release --output-on-failure
+```
+
+## Current Limitations
+- Cross-thread free optimization is partial and not yet lock-free.
+- Fragmentation control and reclaim policies are basic.
+- Benchmark and soak-test coverage is present as structure, but not yet complete as a full competitive suite.
+- C++/Rust/Python integration layers are repository scaffolds and not production bindings.
+
+## Architecture Notes
+- Critical blocks for production-complete status are listed in `docs/architecture/critical-blocks.md`.
 
 ## License
 See `LICENSE`.
